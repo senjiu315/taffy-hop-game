@@ -77,6 +77,9 @@
   let lastCake = -1, prevCake = -1, previewSoundIndex = -1, previewSoundUntil = 0;
   let reviveAvailable = true;
   let audioCtx = null;
+  let audioUnlocked = false;
+  let bgmAudio = null;
+  let bgmAudioReady = false;
   let bgmStarted = false;
   let bgmMaster = null;
   let bgmTimers = [];
@@ -382,19 +385,153 @@
       const AudioCtor = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtor) return null;
       if (!audioCtx) audioCtx = new AudioCtor();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
     } catch (err) {
       return null;
     }
     return audioCtx;
   }
 
+  function getBgmAudio() {
+    if (bgmAudioReady) return bgmAudio;
+    try {
+      const wav = createBgmWav();
+      bgmAudio = new Audio(wav);
+      bgmAudio.loop = true;
+      bgmAudio.preload = 'auto';
+      bgmAudio.volume = 0.58;
+      bgmAudioReady = true;
+    } catch (err) {
+      bgmAudio = null;
+      bgmAudioReady = false;
+    }
+    return bgmAudio;
+  }
+
+  function startBgmAudio() {
+    const audio = getBgmAudio();
+    if (!audio) return;
+    try {
+      audio.muted = false;
+      if (audio.paused) {
+        const result = audio.play();
+        if (result && result.catch) result.catch(() => {});
+      }
+    } catch (err) {
+      // Some mobile browsers only allow the WebAudio fallback.
+    }
+  }
+
+  function createBgmWav() {
+    const sampleRate = 22050;
+    const seconds = 7.2;
+    const total = Math.floor(sampleRate * seconds);
+    const samples = new Float32Array(total);
+    const melody = [523.25, 659.25, 783.99, 659.25, 587.33, 739.99, 880.00, 739.99,
+      659.25, 783.99, 987.77, 880.00, 783.99, 659.25, 587.33, 523.25];
+    const bass = [261.63, 329.63, 392.00, 329.63, 293.66, 369.99, 440.00, 369.99];
+    const chords = [[261.63, 329.63, 392.00], [293.66, 369.99, 440.00], [329.63, 392.00, 493.88], [261.63, 349.23, 440.00]];
+    for (let i = 0; i < melody.length; i++) addSynthNote(samples, sampleRate, melody[i], i * 0.225, 0.18, 0.26, i % 4 ? 0 : 1);
+    for (let i = 0; i < bass.length; i++) addSynthNote(samples, sampleRate, bass[i], i * 0.45, 0.34, 0.15, 0);
+    for (let i = 0; i < 8; i++) addSynthNote(samples, sampleRate, 1046.5 + (i % 2) * 261.6, i * 0.45 + 0.12, 0.08, 0.12, 1);
+    for (let i = 0; i < chords.length; i++) {
+      for (const freq of chords[i]) addSynthNote(samples, sampleRate, freq, i * 1.8, 1.55, 0.06, 1);
+    }
+    for (let i = 0; i < total; i++) samples[i] *= 0.66;
+    return encodeWav(samples, sampleRate);
+  }
+
+  function addSynthNote(samples, sampleRate, freq, startSec, duration, volume, type) {
+    const start = Math.max(0, Math.floor(startSec * sampleRate));
+    const end = Math.min(samples.length, Math.floor((startSec + duration) * sampleRate));
+    const attack = Math.max(1, Math.floor(0.018 * sampleRate));
+    const release = Math.max(1, Math.floor(0.055 * sampleRate));
+    for (let i = start; i < end; i++) {
+      const local = i - start;
+      const remain = end - i;
+      const phase = (i / sampleRate) * freq;
+      const wave = type ? (2 * Math.abs(2 * (phase - Math.floor(phase + 0.5))) - 1) : Math.sin(phase * Math.PI * 2);
+      const env = Math.min(1, local / attack, remain / release);
+      samples[i] += wave * volume * Math.max(0, env);
+    }
+  }
+
+  function encodeWav(samples, sampleRate) {
+    const bytes = new Uint8Array(44 + samples.length * 2);
+    const view = new DataView(bytes.buffer);
+    writeStr(view, 0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeStr(view, 8, 'WAVE');
+    writeStr(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(view, 36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return 'data:audio/wav;base64,' + btoa(binary);
+  }
+
+  function writeStr(view, offset, text) {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+  }
+
+  async function unlockAudio() {
+    const ac = getAudio();
+    startBgmAudio();
+    if (!ac) return null;
+    try {
+      if (ac.state === 'suspended') await ac.resume();
+      const t = ac.currentTime;
+      const gain = ac.createGain();
+      const osc = ac.createOscillator();
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.012, t + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+      osc.frequency.setValueAtTime(880, t);
+      osc.type = 'sine';
+      osc.connect(gain);
+      gain.connect(ac.destination);
+      osc.start(t);
+      osc.stop(t + 0.09);
+      audioUnlocked = ac.state === 'running';
+      ensureBgm();
+    } catch (err) {
+      audioUnlocked = false;
+      bgmStarted = false;
+    }
+    return ac;
+  }
+
+  window.__taffyAudioDebug = function() {
+    return {
+      audioUnlocked,
+      audioCtxState: audioCtx ? audioCtx.state : 'none',
+      bgmStarted,
+      bgmAudioReady,
+      bgmAudioPaused: bgmAudio ? bgmAudio.paused : null,
+      bgmAudioVolume: bgmAudio ? bgmAudio.volume : null
+    };
+  };
+
   function ensureBgm() {
     const ac = getAudio();
-    if (!ac || bgmStarted) return;
+    if (!ac || bgmStarted || ac.state !== 'running') return;
     bgmStarted = true;
     bgmMaster = ac.createGain();
-    bgmMaster.gain.setValueAtTime(0.055, ac.currentTime);
+    bgmMaster.gain.setValueAtTime(0.34, ac.currentTime);
     bgmMaster.connect(ac.destination);
     scheduleBgmBar();
     bgmTimers.push(setInterval(scheduleBgmBar, 7200));
@@ -402,19 +539,23 @@
 
   function scheduleBgmBar() {
     const ac = getAudio();
-    if (!ac || !bgmMaster) return;
+    if (!ac || !bgmMaster || ac.state !== 'running') return;
     const start = ac.currentTime + 0.05;
     const melody = [523.25, 659.25, 783.99, 659.25, 587.33, 739.99, 880.00, 739.99,
       659.25, 783.99, 987.77, 880.00, 783.99, 659.25, 587.33, 523.25];
     const bass = [261.63, 329.63, 392.00, 329.63, 293.66, 369.99, 440.00, 369.99];
+    const chords = [[261.63, 329.63, 392.00], [293.66, 369.99, 440.00], [329.63, 392.00, 493.88], [261.63, 349.23, 440.00]];
     for (let i = 0; i < melody.length; i++) {
-      playBgmNote(melody[i], start + i * 0.225, 0.18, 0.034, i % 4 === 0 ? 'triangle' : 'sine');
+      playBgmNote(melody[i], start + i * 0.225, 0.18, 0.13, i % 4 === 0 ? 'triangle' : 'sine');
     }
     for (let i = 0; i < bass.length; i++) {
-      playBgmNote(bass[i], start + i * 0.45, 0.32, 0.018, 'sine');
+      playBgmNote(bass[i], start + i * 0.45, 0.34, 0.07, 'sine');
     }
     for (let i = 0; i < 8; i++) {
-      playBgmNote(1046.5 + (i % 2) * 261.6, start + i * 0.45 + 0.12, 0.08, 0.012, 'triangle');
+      playBgmNote(1046.5 + (i % 2) * 261.6, start + i * 0.45 + 0.12, 0.08, 0.045, 'triangle');
+    }
+    for (let i = 0; i < chords.length; i++) {
+      for (const freq of chords[i]) playBgmNote(freq, start + i * 1.8, 1.55, 0.032, 'triangle');
     }
   }
 
@@ -810,8 +951,7 @@
     lastStartEventAt = now;
     if (e.cancelable) e.preventDefault();
     const p = point(e);
-    getAudio();
-    ensureBgm();
+    unlockAudio();
     if (shopOpen) { handleShop(p.x,p.y); return; }
     if (reviveQuestion) { handleRevive(p.x,p.y); return; }
     if (hit(shopRect(), p.x, p.y)) { shopOpen = true; pressing = false; return; }
