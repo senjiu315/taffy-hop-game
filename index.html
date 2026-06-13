@@ -77,6 +77,9 @@
   let lastCake = -1, prevCake = -1, previewSoundIndex = -1, previewSoundUntil = 0;
   let reviveAvailable = true;
   let audioCtx = null;
+  let bgmStarted = false;
+  let bgmMaster = null;
+  let bgmTimers = [];
   let lastStartEventAt = 0;
   let lastEndEventAt = 0;
 
@@ -384,6 +387,51 @@
       return null;
     }
     return audioCtx;
+  }
+
+  function ensureBgm() {
+    const ac = getAudio();
+    if (!ac || bgmStarted) return;
+    bgmStarted = true;
+    bgmMaster = ac.createGain();
+    bgmMaster.gain.setValueAtTime(0.055, ac.currentTime);
+    bgmMaster.connect(ac.destination);
+    scheduleBgmBar();
+    bgmTimers.push(setInterval(scheduleBgmBar, 7200));
+  }
+
+  function scheduleBgmBar() {
+    const ac = getAudio();
+    if (!ac || !bgmMaster) return;
+    const start = ac.currentTime + 0.05;
+    const melody = [523.25, 659.25, 783.99, 659.25, 587.33, 739.99, 880.00, 739.99,
+      659.25, 783.99, 987.77, 880.00, 783.99, 659.25, 587.33, 523.25];
+    const bass = [261.63, 329.63, 392.00, 329.63, 293.66, 369.99, 440.00, 369.99];
+    for (let i = 0; i < melody.length; i++) {
+      playBgmNote(melody[i], start + i * 0.225, 0.18, 0.034, i % 4 === 0 ? 'triangle' : 'sine');
+    }
+    for (let i = 0; i < bass.length; i++) {
+      playBgmNote(bass[i], start + i * 0.45, 0.32, 0.018, 'sine');
+    }
+    for (let i = 0; i < 8; i++) {
+      playBgmNote(1046.5 + (i % 2) * 261.6, start + i * 0.45 + 0.12, 0.08, 0.012, 'triangle');
+    }
+  }
+
+  function playBgmNote(freq, start, duration, volume, type) {
+    const ac = audioCtx;
+    if (!ac || !bgmMaster) return;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, start);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(volume, start + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    osc.connect(gain);
+    gain.connect(bgmMaster);
+    osc.start(start);
+    osc.stop(start + duration + 0.04);
   }
 
   function playTone(kind, set = 0) {
@@ -763,6 +811,7 @@
     if (e.cancelable) e.preventDefault();
     const p = point(e);
     getAudio();
+    ensureBgm();
     if (shopOpen) { handleShop(p.x,p.y); return; }
     if (reviveQuestion) { handleRevive(p.x,p.y); return; }
     if (hit(shopRect(), p.x, p.y)) { shopOpen = true; pressing = false; return; }
